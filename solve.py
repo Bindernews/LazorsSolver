@@ -239,7 +239,7 @@ def calculate_puzzle_grid(gray):
         cols = cols,
         size = box_size)
 
-def identification_threshold(gray):
+def prepare_for_identify_tile(gray):
     blur = gray
     blur = cv2.GaussianBlur(blur, (15,15), 0)
     blur = np.uint8(blur / 8) * 8
@@ -249,7 +249,6 @@ def identification_threshold(gray):
 def resize_image(src, shape):
     return np.array(skimage.transform.resize(src, shape, mode='constant', preserve_range=True), dtype=src.dtype)
 
-
 def log_pixel_values(img):
     values, counts = np.unique(img, return_counts=True)
     useful_counts = np.where(counts >= 5)
@@ -258,8 +257,15 @@ def log_pixel_values(img):
     print(values, counts)
 
 def identify_tile(tile):
+    """
+    Use a combination of several methods to attempt to identify the type of tile.
+    Returns the string name of the tile or None if type is unknown.
+    """
+    # This is the number of pixels required for a tile to be "fully" that color. 100x100 = 10,000
     PIXEL_COUNT_THRESHOLD = 8300
+    # All tiles are resized to 100 x 100 for image matching and other things
     size100 = resize_image(tile, (100, 100))
+    # First we try to match known tile templates. These are more complex tiles.
     for k in TEMPLATES.keys():
         res = cv2.matchTemplate(size100, TEMPLATES[k], cv2.TM_CCOEFF_NORMED)
         loc = np.where(res >= 0.8)
@@ -284,18 +290,18 @@ def test_isolate_boxes(img, gray):
     img_copy[grid.rows, :] = COLOR_RED
     imlog(img_copy)
 
-    img_copy = img.copy()[grid.top:grid.bottom]
-    img_copy[img_copy < (0,0,150)] = 0
+    # img_copy = img.copy()[grid.top:grid.bottom]
+    # img_copy[img_copy < (0,0,150)] = 0
     # img_copy = np.uint8(np.bitwise_and(img_copy[:,:,:], (1,255,255)))
     # img_copy = cv2.cvtColor(img_copy, cv2.COLOR_BGR2GRAY)
-    imlog(img_copy)
+    # imlog(img_copy)
     
     # Use slightly larger capture size to make sure we get the whole box
     capture_size = int(grid.size * 1.02)
     offset_value = int(grid.size * 0.01)
 
     # Segment the grayscale image for image matching
-    filtered = identification_threshold(gray_crop)
+    filtered = prepare_for_identify_tile(gray_crop)
     filtered_copy = cv2.cvtColor(filtered, cv2.COLOR_GRAY2BGR)
     filtered_copy[:, grid.cols] = COLOR_RED
     filtered_copy[grid.rows, :] = COLOR_RED
@@ -303,7 +309,7 @@ def test_isolate_boxes(img, gray):
 
     # Now grab each section
     # These two items are for matplotlib and making a nice grid
-    gs = gridspec.GridSpec(len(grid.rows), len(grid.cols), hspace=0.5, wspace=0.05)
+    gs = gridspec.GridSpec(len(grid.rows), len(grid.cols), right=0.6, hspace=0.5, wspace=0.05)
     gsiter = iter(gs)
     for r in grid.rows:
         y = r - offset_value
@@ -313,7 +319,7 @@ def test_isolate_boxes(img, gray):
             tile_gray = gray_crop[y:y + capture_size, x:x + capture_size]
             tile_type = identify_tile(tile)
 
-            # This 
+            # This is to plot the images so we can see what's happening.
             ax = plt.subplot(next(gsiter))
             ax.set_title(tile_type or 'unknown')
             ax.imshow(tile_gray, cmap='gray')
@@ -387,7 +393,7 @@ def test_contrast(img, img_gray):
     multi_threshold(contrast, THRESHOLD_RANGES)
 
 def main():
-    img = cv2.imread('test/test2.png')
+    img = cv2.imread('test/test1.png')
     img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     return test_isolate_boxes(img, img_gray)
 
