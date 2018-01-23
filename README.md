@@ -13,6 +13,9 @@ to install the required libraries.
 Simply execute `python solve.py`. To change the file being processed, edit the `cv2.imread(<filename>)` line in
 the `main()` function.
 
+Note that the program will generate several `logXX.png` files in the directory where it's run. This is for debugging
+purposes as the program is still a work in progress.
+
 ## History
 I became bored with solving the puzzles on my own, so I decided to write a solver because I thought it would be fun.
 Then I realized I didn't want to have to manually enter the game state, so I began tinkering with image processing
