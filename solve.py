@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import gridspec
-from scipy.spatial.distance import pdist, squareform
 from scipy.spatial import cKDTree
 import skimage.transform
 
@@ -25,8 +24,6 @@ for name,fn in TEMPLATE_DATA.items():
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     TEMPLATES[name] = img
     
-INSET = 1
-
 def filter_range(img, min, max, vset=None, invert=False):
     st = vset or max
     ret, dst = cv2.threshold(img, max, 255, cv2.THRESH_TOZERO_INV)
@@ -34,15 +31,6 @@ def filter_range(img, min, max, vset=None, invert=False):
     if invert:
         dst = np.bitwise_xor(dst, st)
     return dst
-
-def multi_threshold(img, ranges):
-    result = img.copy()
-    result.fill(0)
-    for rg in ranges:
-        dst = filter_range(img, *rg)
-        cv2.imwrite(str(rg) + '.png', dst)
-        result += dst
-    return result
 
 def find_points(image, template, threshold=0.8):
     res = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
@@ -72,73 +60,12 @@ def fuse_points(points, radius=100):
     fixed_points = [points[x] for x in leftover_rows]
     return fixed_points
 
-def solve(image, img_gray):
-    img_copy = image.copy()
-    
-    b_block = find_points(img_gray, TEMPLATES['block'])
-    b_black = find_points(img_gray, TEMPLATES['black'], 0.9)
-    b_portal = find_points(img_gray, TEMPLATES['portal'])
-    b_empty = find_points(img_gray, TEMPLATES['empty'], 0.5)
-    p_laser = find_points(img_gray, TEMPLATES['laser'])
-    p_target = find_points(img_gray, TEMPLATES['target'])
-
-    all_blocks = [] + b_block + b_black + b_portal + b_empty
-    blocks_x, blocks_y = zip(*all_blocks)
-    block_size = TEMPLATES['block'].shape[::-1]
-
-    log_points(img_copy, all_blocks, 'block')
-    cv2.imwrite('res.png', img_copy)
-    
-    
-def log_points(image, points, name):
-    w, h = TEMPLATES[name].shape[::-1]
-    print(name, points)
-    for pt in points:
-        pos1 = (pt[0] + INSET, pt[1] + INSET)
-        pos2 = (pt[0] + w - INSET, pt[1] + h - INSET)
-        cv2.rectangle(image, pos1, pos2, (0,0,255), 2)
-
-THRESHOLD_RANGES = [
-    (0  ,  70),
-#    (70 , 128),
-#    (128, 255),
-    (70 , 140),
-    (140, 255)
-]
-
-
-def test_thresh(img, img_gray):
-    cv2.imwrite('res_gray.png', img_gray)
-    img_gray = multi_threshold(img_gray, THRESHOLD_RANGES)
-    cv2.imwrite('res_thresh.png', img_gray)
-
-def test_blur(img, gray):
-    blur = gray
-    # blur = cv2.medianBlur(blur, 15)
-    blur = cv2.GaussianBlur(blur, (15,15), 0)
-    blur = np.uint8(blur / 8) * 8
-    cv2.imwrite('res_blur.png', blur)
-    multi_threshold(blur, THRESHOLD_RANGES)
-
-def test_fast_threshold(img, gray):
-    blur = gray
-    blur = cv2.GaussianBlur(blur, (15,15), 0)
-    blur = np.uint8(blur / 8) * 8
-    blur = np.uint8(blur / 65) * 65
-    cv2.imwrite('res_blur.png', blur)
-
-def test_contrast(img, img_gray):
-#    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    blur = cv2.medianBlur(img_gray, 7)
-#    contrast = clahe.apply(blur)
-    contrast = blur
-    cv2.imwrite('res_contrast.png', contrast)
-    multi_threshold(contrast, THRESHOLD_RANGES)
-
-
 global _imlog_count
 _imlog_count = 0
 def imlog(img, name=None):
+    """
+    Convenience function to save the given image to a .png.
+    """
     global _imlog_count
     name = ('-' + name) if name else ''
     fname = 'log{:02}{:}.png'.format(_imlog_count, name)
@@ -146,6 +73,9 @@ def imlog(img, name=None):
     cv2.imwrite(fname, img)
 
 def calc_threshold_ranges(data):
+    """
+    Poorly-named function which calculates the ranges of "on" pixels, as well as the inverse.
+    """
     # Have numpy determine where the values change (T to F, F to T)
     diffs = np.diff(data)
     # toone = beginning of set of values, tozero = end of set of values
@@ -164,7 +94,6 @@ def fill_in_small_empty_areas(data, toone, tozero, inv_ranges, threshold):
         if inv_ranges[i] <= threshold:
             data[tozero[i]:toone[i + 1] + 1] = 1
     
-    
 def find_center_area(gray):
     """
     Find the center area of the puzzle.
@@ -175,14 +104,16 @@ def find_center_area(gray):
     cur = cv2.medianBlur(cur, 21)
     cur = filter_range(cur, 50, 104, invert=True)
     imlog(cur)
+    # Make a copy of the image before we modify it more
     blocked = cur.copy()
+    # Set all positive values to 1
+    cur[cur > 0] = 1
     # Sum each row to determine the largest most continuous set of rows
-    cur[cur > 0] = 1    # Set all positive values to 1
     rows = np.sum(cur, 1)
-    # Set the first and last rows to 0 so we can find start and end points. This is fine b/c of the header
+    # Set the first and last rows to 0 so we have a consistent pattern 0 to 1 to 0 to 1, etc.
     rows[0] = 0
     rows[-1] = 0
-    # Filter out small values and convert to set or 1s and 0s
+    # Filter out small values and convert to set of 1s and 0s
     rows[rows <= int(width * 0.10)] = 0
     rows[rows > 0] = 1
     rows = np.int8(rows)
@@ -320,27 +251,28 @@ def resize_image(src, shape):
 
 
 def log_pixel_values(img):
-    values, counts = np.unique(size100, return_counts=True)
+    values, counts = np.unique(img, return_counts=True)
     useful_counts = np.where(counts >= 5)
     values = values[useful_counts]
     counts = counts[useful_counts]
     print(values, counts)
 
 def identify_tile(tile):
-    PIXEL_COUNT_THRESHOLD = 8500
+    PIXEL_COUNT_THRESHOLD = 8300
     size100 = resize_image(tile, (100, 100))
     for k in TEMPLATES.keys():
         res = cv2.matchTemplate(size100, TEMPLATES[k], cv2.TM_CCOEFF_NORMED)
         loc = np.where(res >= 0.8)
         if len(loc[0]) > 0:
             return k
-    # log_pixel_values(size100)
     # Certain tiles are mostly solid color
     values, counts = np.unique(size100, return_counts=True)
     if counts[np.where(values == 65)] >= PIXEL_COUNT_THRESHOLD:
         return 'empty'
     if counts[np.where(values == 0)] >= PIXEL_COUNT_THRESHOLD:
         return 'black'
+    # If we have no idea what it is, then display potentially useful pixel values
+    log_pixel_values(size100)
     return None
 
 def test_isolate_boxes(img, gray):
@@ -416,58 +348,46 @@ def test_find_square_size(img, gray):
     img_copy[:, [cols_all.min(), cols_all.max()]] = (255,0,0)
     img_copy[[rows_all.min(), rows_all.max()], :] = (255,0,0)
     imlog(img_copy)
-
-def test_corner(img, gray):
-    # Lots of blur to smooth out textures
-    cur = cv2.medianBlur(gray, 9)
-    imlog(cur)
-    # Filter for the specific range of luminosity
-    cur = filter_range(gray, 50, 104)
-    # Extra blurring to smooth edges
-    cur = cv2.medianBlur(cur, 21)
-    imlog(cur)
-    # Convert to float and do corner detection
-    flt = np.float32(cur)
-    cur = cv2.cornerHarris(flt, 50, 15, 0.04)
-    #cur = cv2.dilate(cur, None)
-    # Filter out small values
-    cur[cur <= 0.02*cur.max()] = 0
-    imlog(cur)
-    # Add "corners" to the image for display purposes
-    img_copy = img.copy()
-    img_copy[cur > 0] = [0,0,255]
-    imlog(img_copy)
-    # Sum each row to determine largest mostly continuous vertical area
-    rows = np.int8(np.sum(cur, 1) > 0)
-    # Set the first and last rows to 0. This is fine b/c of the header
-    rows[0] = 0
-    rows[-1] = 0
-    # Have numpy determine where the values change (T to F, F to T)
-    diffs = np.diff(rows)
-    toone = np.where(diffs == 1)[0]
-    tozero = np.where(diffs == -1)[0]
-    ranges = tozero - toone
-    inv_ranges = toone[1:] - tozero[:-1]
-    plt.plot(diffs)
-    plt.show()
-    max_rg = np.argmax(ranges)
-    # Crop image
-    img_copy = img.copy()
-    if max_rg > 0:
-        top = toone[max_rg] - int(inv_ranges[max_rg - 1] * 0.75)
-    else:
-        top = 0
-    if max_rg < len(ranges) - 1:
-        bottom = tozero[max_rg] + int(inv_ranges[max_rg] * 0.75)
-    else:
-        bottom = img.shape[0]
-    img_copy = img_copy[top:bottom]
-    imlog(img_copy)
-    return cur
     
 
+THRESHOLD_RANGES = [
+    (0  ,  70),
+#    (70 , 128),
+#    (128, 255),
+    (70 , 140),
+    (140, 255)
+]
+
+def test_thresh(img, img_gray):
+    cv2.imwrite('res_gray.png', img_gray)
+    img_gray = multi_threshold(img_gray, THRESHOLD_RANGES)
+    cv2.imwrite('res_thresh.png', img_gray)
+
+def test_blur(img, gray):
+    blur = gray
+    # blur = cv2.medianBlur(blur, 15)
+    blur = cv2.GaussianBlur(blur, (15,15), 0)
+    blur = np.uint8(blur / 8) * 8
+    cv2.imwrite('res_blur.png', blur)
+    multi_threshold(blur, THRESHOLD_RANGES)
+
+def test_fast_threshold(img, gray):
+    blur = gray
+    blur = cv2.GaussianBlur(blur, (15,15), 0)
+    blur = np.uint8(blur / 8) * 8
+    blur = np.uint8(blur / 65) * 65
+    cv2.imwrite('res_blur.png', blur)
+
+def test_contrast(img, img_gray):
+#    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    blur = cv2.medianBlur(img_gray, 7)
+#    contrast = clahe.apply(blur)
+    contrast = blur
+    cv2.imwrite('res_contrast.png', contrast)
+    multi_threshold(contrast, THRESHOLD_RANGES)
+
 def main():
-    img = cv2.imread('tests/test2.png')
+    img = cv2.imread('test/test2.png')
     img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     return test_isolate_boxes(img, img_gray)
 
