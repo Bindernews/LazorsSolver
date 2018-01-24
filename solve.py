@@ -4,61 +4,58 @@ import cv2
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import gridspec
-from scipy.spatial import cKDTree
 import skimage.transform
 
 COLOR_RED = (0,0,255)
+DEBUG = True
+# Normallized grid size (square)
+NORM_GRID_SIZE = 100
 
-TEMPLATE_DATA = {
-    'block': 'template_white.png',
-    # 'black': 'template_black.png',
-    # 'empty': 'template_empty.png',
-    # 'laser': 'template_laser.png',
-    'portal': 'template_portal.png',
-    # 'target': 'template_target.png',
-}
+PuzzleGrid = namedtuple('PuzzleGrid', [
+    'top',          # Top of the cropped puzzle area (contains the entire puzzle, not just the grid)
+    'bottom',       # Bottom of the cropped puzzle area, contains the entire puzzle
+    'rows',         # Array of Y-values indicating the top of each row, excludes the bottom of the last row
+    'cols',         # Array of X-values indicating the left of each column, excludes the right side of the last col
+    'all_rows',     # rows + last row
+    'all_cols',     # cols + last col
+    'half_rows',    # rows + half-rows, for targets and lasers
+    'half_cols',    # cols + half-cols, for targets and lasers
+    'size'          # Size of the square box size
+    ]
+)
 
-TEMPLATES = {}
-for name,fn in TEMPLATE_DATA.items():
-    img = cv2.imread('template/' + fn)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    TEMPLATES[name] = img
+def imread_gray(fname):
+    img = cv2.imread(fname, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError('File ' + fname + ' not found')
+    return img
+
+class Templates:
+    _TILE_DATA = {
+        'block': 'template_white.png',
+        'portal': 'template_portal.png',
+    }
+    _LASER_FILE = 'template_laser.png'
     
+    def __init__(self, folder='template/'):
+        self.folder = folder
+        self.TILES = {}
+        for k,v in Templates._TILE_DATA.items():
+            self.TILES[k] = imread_gray(folder + v)
+        self.LASER = cv2.imread(folder + Templates._LASER_FILE)
+        if self.LASER is None:
+            raise ValueError('Laser template not found')
+
+# Holds template information
+TEMPLATES = Templates()
+
 def filter_range(img, min, max, vset=None, invert=False):
     st = vset or max
     ret, dst = cv2.threshold(img, max, 255, cv2.THRESH_TOZERO_INV)
     ret, dst = cv2.threshold(dst, min, st, cv2.THRESH_BINARY, dst)
     if invert:
-        dst = np.bitwise_xor(dst, st)
+        dst = np.bitwise_xor(dst, st, out=dst)
     return dst
-
-def find_points(image, template, threshold=0.8):
-    res = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
-    loc = np.where( res >= threshold )
-    # Get the list of points as (x,y) pairs
-    points = list(zip(*loc[::-1]))
-    return fuse_points(points)
-
-def fuse_points(points, radius=100):
-    """
-    Takes a list of (x,y) tuples and merges points within the given raidus.
-    :return: list of point tuples
-    """
-    # Skip if no match
-    if len(points) == 0:
-        return []
-    print('Num points: ' + str(len(points)))
-    # The templates aren't exact so we group our points spatially so we can get
-    # 1 point per block.
-    # Create groupings and get a list of points which are close
-    tree = cKDTree(points)
-    rows_to_fuse = tree.query_pairs(r=radius)
-    # Find rows that should NOT be fused (thus finding non-merged points)
-    xset, yset = [set(x) for x in zip(*rows_to_fuse)]
-    leftover_rows = xset & (xset ^ yset)
-    # Grab the desired points from the original list
-    fixed_points = [points[x] for x in leftover_rows]
-    return fixed_points
 
 global _imlog_count
 _imlog_count = 0
@@ -170,7 +167,7 @@ def histogram_axis(img, axis, threshold=0.2):
 def edge_detect_rows_cols(img, threshold=0.2):
     # Do edge detection and then build a column histogram
     edges = cv2.Canny(img, 50, 200)
-    imlog(edges)
+    # imlog(edges)
     edges[edges > 1] = 1
     cols, _ = histogram_axis(edges, 0, threshold)
     rows, _ = histogram_axis(edges, 1, threshold)
@@ -203,12 +200,6 @@ def nearest_step(start, step, target):
     x = start + (n * step)
     return int(x)
 
-
-PuzzleGrid = namedtuple('PuzzleGrid', [
-    'top', 'bottom', 'rows', 'cols', 'size'
-    ]
-)
-
 def calculate_puzzle_grid(gray):
     # Find the center area
     top, bottom, filter_crop = find_center_area(gray)
@@ -229,24 +220,53 @@ def calculate_puzzle_grid(gray):
     row_min = nearest_step(rows[1], box_size, row_min)
     col_min = nearest_step(cols[1], box_size, col_min)
     # Use the corrected row_min and col_min to calculate new row and column arrays
-    rows = [row_min + (box_size * i) for i in range(row_count)]
-    cols = [col_min + (box_size * i) for i in range(col_count)]
+    rows = np.int32([row_min + (box_size * i) for i in range(row_count + 1)])
+    cols = np.int32([col_min + (box_size * i) for i in range(col_count + 1)])
+    half_rows = np.int32(list(range(rows[0], rows[-1], box_size // 2)))
+    half_cols = np.int32(list(range(cols[0], cols[-1], box_size // 2)))
     # Return all relevant data as a PuzzleGrid
     return PuzzleGrid(
         top = top,
         bottom = bottom,
-        rows = rows,
-        cols = cols,
+        rows = rows[:-1], cols = cols[:-1],
+        all_rows = rows,  all_cols = cols,
+        half_rows = half_rows, half_cols = half_cols,
         size = box_size)
+
+def np_divmul(arr, divisor):
+    arr = np.floor_divide(arr, divisor, out=arr)
+    arr = np.multiply(arr, divisor, out=arr)
+    return arr
 
 def prepare_for_identify_tile(gray):
     blur = gray
-    blur = cv2.GaussianBlur(blur, (15,15), 0)
-    blur = np.uint8(blur / 8) * 8
-    blur = np.uint8(blur / 65) * 65
+    blur = np.uint8(cv2.GaussianBlur(blur, (15,15), 0))
+    blur = np_divmul(blur, 8)
+    blur = np_divmul(blur, 65)
     return blur
 
+def normalize_puzzle_grid(grid, img):
+    """
+    Normallize the image to a standard size to ease image processing.
+    Provides one tile's worth of border around the grid.
+    """
+    height, width = img.shape[:2]
+    orig_top = grid.rows[0] + grid.top - grid.size
+    orig_bottom = grid.rows[-1] + grid.top + (grid.size * 2)    # last row + border
+    orig_left = max(grid.cols[0] - grid.size, 0)
+    orig_right = min(grid.cols[-1] + (grid.size * 2), width)    # last col + border
+    new_width = NORM_GRID_SIZE * (len(grid.rows) + 3)   # last col + left border + right border
+    new_height = NORM_GRID_SIZE * (len(grid.cols) + 3)  # last row + top border + bottom border
+    new_rows = list(range(NORM_GRID_SIZE, new_height, NORM_GRID_SIZE))
+    new_cols = list(range(NORM_GRID_SIZE, new_width, NORM_GRID_SIZE))
+    print(orig_top, orig_bottom, orig_left, orig_right)
+    new_img = resize_image(img[orig_top:orig_bottom, orig_left:orig_right], (new_height, new_width))
+    new_grid = PuzzleGrid(top=0, bottom=new_height, rows=new_rows,
+        cols=new_cols, size=NORM_GRID_SIZE)
+    return new_grid, new_img
+
 def resize_image(src, shape):
+    """ Resize an image correctly. """
     return np.array(skimage.transform.resize(src, shape, mode='constant', preserve_range=True), dtype=src.dtype)
 
 def log_pixel_values(img):
@@ -256,45 +276,40 @@ def log_pixel_values(img):
     counts = counts[useful_counts]
     print(values, counts)
 
-def identify_tile(tile):
+def identify_tile(tile_orig):
     """
     Use a combination of several methods to attempt to identify the type of tile.
     Returns the string name of the tile or None if type is unknown.
     """
-    # This is the number of pixels required for a tile to be "fully" that color. 100x100 = 10,000
+    # This is the number of pixels required for a tile to be "fully" that color. 83%
     PIXEL_COUNT_THRESHOLD = 8300
-    # All tiles are resized to 100 x 100 for image matching and other things
-    size100 = resize_image(tile, (100, 100))
+    tile = resize_image(tile_orig, (NORM_GRID_SIZE, NORM_GRID_SIZE))
     # First we try to match known tile templates. These are more complex tiles.
-    for k in TEMPLATES.keys():
-        res = cv2.matchTemplate(size100, TEMPLATES[k], cv2.TM_CCOEFF_NORMED)
+    for k, template in TEMPLATES.TILES.items():
+        res = cv2.matchTemplate(tile, template, cv2.TM_CCOEFF_NORMED)
         loc = np.where(res >= 0.8)
         if len(loc[0]) > 0:
             return k
     # Certain tiles are mostly solid color
-    values, counts = np.unique(size100, return_counts=True)
+    values, counts = np.unique(tile, return_counts=True)
     if counts[np.where(values == 65)] >= PIXEL_COUNT_THRESHOLD:
         return 'empty'
     if counts[np.where(values == 0)] >= PIXEL_COUNT_THRESHOLD:
         return 'black'
     # If we have no idea what it is, then display potentially useful pixel values
-    log_pixel_values(size100)
+    log_pixel_values(tile)
     return None
 
 def test_isolate_boxes(img, gray):
+    # Determine where the puzzle is and the grid size
     grid = calculate_puzzle_grid(gray)
     gray_crop = gray[grid.top:grid.bottom]
 
-    img_copy = img.copy()[grid.top:grid.bottom]
-    img_copy[:, grid.cols] = COLOR_RED
-    img_copy[grid.rows, :] = COLOR_RED
-    imlog(img_copy)
-
-    # img_copy = img.copy()[grid.top:grid.bottom]
-    # img_copy[img_copy < (0,0,150)] = 0
-    # img_copy = np.uint8(np.bitwise_and(img_copy[:,:,:], (1,255,255)))
-    # img_copy = cv2.cvtColor(img_copy, cv2.COLOR_BGR2GRAY)
-    # imlog(img_copy)
+    if DEBUG:
+        img_copy = img.copy()[grid.top:grid.bottom]
+        img_copy[:, grid.cols] = COLOR_RED
+        img_copy[grid.rows, :] = COLOR_RED
+        imlog(img_copy)
     
     # Use slightly larger capture size to make sure we get the whole box
     capture_size = int(grid.size * 1.02)
@@ -302,10 +317,11 @@ def test_isolate_boxes(img, gray):
 
     # Segment the grayscale image for image matching
     filtered = prepare_for_identify_tile(gray_crop)
-    filtered_copy = cv2.cvtColor(filtered, cv2.COLOR_GRAY2BGR)
-    filtered_copy[:, grid.cols] = COLOR_RED
-    filtered_copy[grid.rows, :] = COLOR_RED
-    imlog(filtered_copy)
+    if DEBUG:
+        filtered_copy = cv2.cvtColor(filtered, cv2.COLOR_GRAY2BGR)
+        filtered_copy[:, grid.cols] = COLOR_RED
+        filtered_copy[grid.rows, :] = COLOR_RED
+        imlog(filtered_copy)
 
     # Now grab each section
     # These two items are for matplotlib and making a nice grid
@@ -319,86 +335,90 @@ def test_isolate_boxes(img, gray):
             tile_gray = gray_crop[y:y + capture_size, x:x + capture_size]
             tile_type = identify_tile(tile)
 
-            # This is to plot the images so we can see what's happening.
-            ax = plt.subplot(next(gsiter))
-            ax.set_title(tile_type or 'unknown')
-            ax.imshow(tile_gray, cmap='gray')
-            ax.set_xticks([])
-            ax.set_yticks([])
-    plt.show()
+            if DEBUG:
+                # This is to plot the images so we can see what's happening.
+                ax = plt.subplot(next(gsiter))
+                ax.set_title(tile_type or 'unknown')
+                ax.imshow(tile_gray, cmap='gray')
+                ax.set_xticks([])
+                ax.set_yticks([])
+    if DEBUG:
+        plt.show()
 
-def test_find_center(img, gray):
-    # Blur and filter to get prepare for find_center_area
-    top, bottom, blocked = find_center_area(gray)
-    # Crop so we have the correct area
-    imlog(blocked)
-    return blocked, top, bottom
+def test_find_targets(img, gray):
+    grid = calculate_puzzle_grid(gray)
+    gray_crop = gray[grid.top:grid.bottom]
+    proc = gray_crop
+    circles = cv2.HoughCircles(proc, cv2.HOUGH_GRADIENT, 1.3, (grid.size // 4), maxRadius=(grid.size // 3))
 
-def test_find_square_size(img, gray):
-    height, width = gray.shape
-    # First find the center area
-    top, bottom, filter_crop = find_center_area(gray)
-    gray_crop = gray[top:bottom]
-    imlog(gray_crop)
-    # Use the original to find the actual box size
-    rows, cols, box_size = find_square_size(gray_crop)
-    # Use the filtered version to find min/max row and col
-    rows_all, cols_all = edge_detect_rows_cols(filter_crop)
-    rows_all = np.append(rows_all, rows)
-    cols_all = np.append(cols_all, cols)
-    print(rows, cols, box_size)
+    if circles is None:
+        print('No circles')
+        return
+
+    circles = np.round(circles[0, :]).astype("int")
+    epsilon = grid.size // 4
+    for (x, y, r) in circles:
+        c_row = np.where(np.abs(grid.half_rows - y) <= epsilon)
+        c_col = np.where(np.abs(grid.half_cols - x) <= epsilon)
+        print(c_row, c_col)
+
+    if DEBUG:
+        output = cv2.cvtColor(proc, cv2.COLOR_GRAY2BGR)
+        # convert the (x, y) coordinates and radius of the circles to integers
+        
+        # loop over the (x, y) coordinates and radius of the circles
+        for (x, y, r) in circles:
+            # draw the circle in the output image, then draw a rectangle
+            # corresponding to the center of the circle
+            cv2.circle(output, (x, y), r, (0, 255, 0), 4)
+            cv2.rectangle(output, (x - 5, y - 5), (x + 5, y + 5), (0, 128, 255), -1)
+        imlog(output)
+
+def test_find_lasers(img, gray):
+    grid = calculate_puzzle_grid(gray)
+    color_crop = img[grid.top:grid.bottom]
+    gray_crop = gray[grid.top:grid.bottom]
+
+    # Edge detection higlights the lasers
+    edges = cv2.Canny(gray_crop, 50, 200)
+    # Now try to find the lines
+    linesP = cv2.HoughLinesP(edges, 1, np.pi / 180,
+        threshold = 50,
+        minLineLength = (grid.size // 8),
+        maxLineGap = 0)
+    print(linesP)
+
+    if DEBUG:
+        output = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        for ln in linesP:
+            pt1, pt2 = tuple(ln[0][0:2]), tuple(ln[0][2:4])
+            cv2.line(output, pt1, pt2, (255,0,255)) 
+        cv2.imshow('lines', output)
+
+    # Lasers are always at a 45-degree angle (at least for us)
+    for ln in linesP:
+        ln = ln[0]
+        pt1, pt2 = ln[0:2], ln[2:4]
+
     
-    img_copy = img.copy()[top:bottom]
-    img_copy[:, cols] = (0,0,255)
-    img_copy[rows, :] = (0,0,255)
-    img_copy[:, [cols_all.min(), cols_all.max()]] = (255,0,0)
-    img_copy[[rows_all.min(), rows_all.max()], :] = (255,0,0)
-    imlog(img_copy)
-    
-
-THRESHOLD_RANGES = [
-    (0  ,  70),
-#    (70 , 128),
-#    (128, 255),
-    (70 , 140),
-    (140, 255)
-]
-
-def test_thresh(img, img_gray):
-    cv2.imwrite('res_gray.png', img_gray)
-    img_gray = multi_threshold(img_gray, THRESHOLD_RANGES)
-    cv2.imwrite('res_thresh.png', img_gray)
-
-def test_blur(img, gray):
-    blur = gray
-    # blur = cv2.medianBlur(blur, 15)
-    blur = cv2.GaussianBlur(blur, (15,15), 0)
-    blur = np.uint8(blur / 8) * 8
-    cv2.imwrite('res_blur.png', blur)
-    multi_threshold(blur, THRESHOLD_RANGES)
-
-def test_fast_threshold(img, gray):
-    blur = gray
-    blur = cv2.GaussianBlur(blur, (15,15), 0)
-    blur = np.uint8(blur / 8) * 8
-    blur = np.uint8(blur / 65) * 65
-    cv2.imwrite('res_blur.png', blur)
-
-def test_contrast(img, img_gray):
-#    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    blur = cv2.medianBlur(img_gray, 7)
-#    contrast = clahe.apply(blur)
-    contrast = blur
-    cv2.imwrite('res_contrast.png', contrast)
-    multi_threshold(contrast, THRESHOLD_RANGES)
+    # hsv = cv2.cvtColor(color_crop, cv2.COLOR_BGR2HSV)
+    # hue = hsv[:,:,0]
+    # hsv[np.where(hsv[:,:,2] <= 180)] = 0
+    # hsv[30 < hue and hue < 220] = 0
+    # cv2.imshow('red', cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
+    # mask = cv2.inRange(hsv, (30, 0, 0), (200, 255, 255))
+    # cv2.imshow('mask', mask)
+    res = cv2.matchTemplate(color_crop, TEMPLATES.LASER, cv2.TM_CCOEFF_NORMED)
+    lasers = np.where(res >= 0.8)
+    print(lasers)
+    cv2.waitKey(0)
 
 def main():
-    img = cv2.imread('test/test1.png')
+    img = cv2.imread('test/test3.png')
     img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     return test_isolate_boxes(img, img_gray)
 
 if __name__ == '__main__':
     main()
 
-    
 
